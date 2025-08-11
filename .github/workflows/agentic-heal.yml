@@ -13,8 +13,7 @@ jobs:
       pull-requests: write
 
     steps:
-      - name: Checkout full repo
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
@@ -25,64 +24,25 @@ jobs:
           path: ./ci-logs
         continue-on-error: true
 
-      - name: Set up Python
+      - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
-      - name: Install agent deps
+      - name: Install deps
         run: |
           python -m pip install -r agents/requirements.txt
 
-      - name: Auth for Vertex
+      - name: Auth & env
         run: |
           echo '${{ secrets.GCP_SA_KEY }}' > gcp-key.json
           echo "GOOGLE_APPLICATION_CREDENTIALS=$PWD/gcp-key.json" >> $GITHUB_ENV
           echo "GCP_PROJECT=${{ secrets.GCP_PROJECT_ID }}" >> $GITHUB_ENV
           echo "GCP_LOCATION=${{ secrets.GCP_LOCATION }}" >> $GITHUB_ENV
           echo "VERTEX_MODEL=${{ secrets.VERTEX_MODEL }}" >> $GITHUB_ENV
+          echo "GH_BOT_ACTOR=agentic-bot" >> $GITHUB_ENV
+          echo "GH_BOT_EMAIL=agentic-bot@example.com" >> $GITHUB_ENV
 
-      - name: Triage logs with Vertex
-        id: triage
+      - name: Run MCP server plan
         run: |
-          python agents/log_triage.py > triage.json
-          echo "triage_text<<EOF" >> $GITHUB_OUTPUT
-          cat triage.json >> $GITHUB_OUTPUT
-          echo "EOF" >> $GITHUB_OUTPUT
-
-      - name: Prepare repo snapshot
-        id: snap
-        run: |
-          {
-            echo "repo_snapshot<<EOF"
-            echo "=== app/src/server.js ==="
-            sed -n '1,250p' app/src/server.js
-            echo
-            echo "=== app/__tests__/health.test.js ==="
-            sed -n '1,250p' app/__tests__/health.test.js 2>/dev/null || true
-            echo "=== app/tests/health.test.js ==="
-            sed -n '1,250p' app/tests/health.test.js 2>/dev/null || true
-            echo "EOF"
-          } >> $GITHUB_OUTPUT
-
-      - name: Ask Vertex for a patch (unified diff)
-        id: propose
-        env:
-          TRIAGE_TEXT: ${{ steps.triage.outputs.triage_text }}
-          REPO_SNAPSHOT: ${{ steps.snap.outputs.repo_snapshot }}
-        run: |
-          python agents/fix_suggest.py > diff.json
-          echo "patch_diff<<EOF" >> $GITHUB_OUTPUT
-          jq -r '.diff' diff.json >> $GITHUB_OUTPUT || true
-          echo "EOF" >> $GITHUB_OUTPUT
-
-      - name: Apply patch, run tests, and open PR if green
-        id: apply
-        env:
-          PATCH_DIFF: ${{ steps.propose.outputs.patch_diff }}
-          GH_BOT_ACTOR: "agentic-bot"
-          GH_BOT_EMAIL: "agentic-bot@example.com"
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          python agents/error_fix.py > result.json || true
-          cat result.json
+          python agents/mcp_server.py
