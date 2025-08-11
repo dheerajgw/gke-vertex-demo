@@ -18,15 +18,18 @@ def run(cmd, cwd=None, check=True):
 
 # --- Vertex client (lazy import) ----------------------------------------------
 def vertex_generate(prompt: str) -> str:
-    from google.cloud import aiplatform
+    import vertexai
+    from vertexai.generative_models import GenerativeModel
+
     project = os.environ["GCP_PROJECT"]
-    location = os.environ.get("GCP_LOCATION","us-central1")
-    model_name = os.environ.get("VERTEX_MODEL","gemini-1.5-pro")
-    aiplatform.init(project=project, location=location)
-    model = aiplatform.GenerativeModel(model_name)
+    location = os.environ.get("GCP_LOCATION", "us-central1")
+    model_name = os.environ.get("VERTEX_MODEL", "gemini-1.5-pro")
+
+    vertexai.init(project=project, location=location)
+    model = GenerativeModel(model_name)
+
     resp = model.generate_content(prompt)
     return getattr(resp, "text", str(resp))
-
 # --- Tools --------------------------------------------------------------------
 @tool("gather_context")
 def gather_context(params):
