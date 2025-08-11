@@ -23,5 +23,4 @@ jobs:
         with:
           name: ci-logs
           path: app/junit.xml
-          if-no-files-found: ignore
-
+          if-no-files-found: warn
