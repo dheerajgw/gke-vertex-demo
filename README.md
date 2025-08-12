@@ -1,1 +1,1 @@
-#gke-vertex-demo
+# Agentic AI PoC (clean reset)
