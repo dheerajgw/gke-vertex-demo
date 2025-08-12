@@ -1,0 +1,12 @@
+{
+  "name": "gke-vertex-fancy-app",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "build:web": "cd web && npm ci && npm run build",
+    "start": "node api/server.js",
+    "test": "node ./node_modules/jest/bin/jest.js --runInBand"
+  },
+  "dependencies": { "express": "^4.19.2" },
+  "devDependencies": { "jest": "^29.7.0", "supertest": "^7.0.0", "jest-junit": "^16.0.0" }
+}
