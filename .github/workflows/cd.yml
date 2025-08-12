@@ -3,6 +3,7 @@ name: CD
 on:
   push:
     branches: ["main"]
+  workflow_dispatch:   # Allows manual trigger from GitHub UI
 
 jobs:
   build_push_deploy:
@@ -42,9 +43,6 @@ jobs:
 
       - name: Get GKE credentials
         run: |
-          # Provide these two secrets in the next step:
-          #   GKE_CLUSTER   = your GKE cluster name
-          #   GKE_REGION    = region (e.g., us-central1) OR GKE_ZONE if zonal (e.g., us-central1-a)
           if [ -n "${{ secrets.GKE_REGION }}" ]; then
             gcloud container clusters get-credentials "${{ secrets.GKE_CLUSTER }}" --region "${{ secrets.GKE_REGION }}"
           else
@@ -53,11 +51,9 @@ jobs:
 
       - name: Deploy manifests
         run: |
-          # Substitute PROJECT_ID into the deployment image reference, then apply
           sed "s/PROJECT_ID/${PROJECT_ID}/g" k8s/deployment.yaml | kubectl apply -f -
           kubectl apply -f k8s/service.yaml
 
       - name: Show rollout status
         run: |
-          kubectl rollout status deploy/fancy-app --timeout=120s
-          kubectl get svc fancy-app -o wide
+          kubectl rollout status deploy/fancy-app -n gke-vertex-demo
