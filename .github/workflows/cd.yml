@@ -28,6 +28,12 @@ jobs:
           credentials_json: ${{ secrets.GCP_SA_KEY }}
 
       - uses: google-github-actions/setup-gcloud@v2
+      
+      - name: Install GKE auth plugin
+        run: gcloud components install gke-gcloud-auth-plugin -q
+
+      - name: Enable plugin for kubectl
+        run: echo "USE_GKE_GCLOUD_AUTH_PLUGIN=True" >> $GITHUB_ENV
 
       - name: Configure AR Docker auth
         run: |
