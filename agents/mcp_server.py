@@ -9,7 +9,7 @@ def vertex_generate(prompt: str) -> str:
     from vertexai.generative_models import GenerativeModel
     project = os.environ["GCP_PROJECT"]
     location = os.environ.get("GCP_LOCATION","us-central1")
-    model_name = os.environ.get("VERTEX_MODEL","gemini-1.5-pro")
+    model_name = os.environ.get("VERTEX_MODEL","gemini-2.0-flash")
     vertexai.init(project=project, location=location)
     resp = GenerativeModel(model_name).generate_content(prompt)
     return getattr(resp, "text", str(resp))
