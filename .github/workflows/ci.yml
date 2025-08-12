@@ -9,7 +9,7 @@ jobs:
     runs-on: ubuntu-latest
     defaults:
       run:
-        working-directory: app
+        working-directory: app/web
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
