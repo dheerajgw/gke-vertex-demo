@@ -1,0 +1,63 @@
+name: CD
+
+on:
+  push:
+    branches: ["main"]
+
+jobs:
+  build_push_deploy:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+
+    env:
+      AR_REGION: us-central1
+      PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
+      REPO_NAME: node-app-repo
+      IMAGE_NAME: fancy-app
+      IMAGE_TAG: ${{ github.sha }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # Auth to GCP (using the same SA key you already created)
+      - uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+
+      - uses: google-github-actions/setup-gcloud@v2
+
+      - name: Configure AR Docker auth
+        run: |
+          gcloud auth configure-docker ${AR_REGION}-docker.pkg.dev -q
+
+      - name: Build & Push Image
+        working-directory: app
+        run: |
+          IMAGE="${AR_REGION}-docker.pkg.dev/${PROJECT_ID}/${REPO_NAME}/${IMAGE_NAME}"
+          docker build -t "${IMAGE}:latest" -t "${IMAGE}:${IMAGE_TAG}" .
+          docker push "${IMAGE}:latest"
+          docker push "${IMAGE}:${IMAGE_TAG}"
+
+      - name: Get GKE credentials
+        run: |
+          # Provide these two secrets in the next step:
+          #   GKE_CLUSTER   = your GKE cluster name
+          #   GKE_REGION    = region (e.g., us-central1) OR GKE_ZONE if zonal (e.g., us-central1-a)
+          if [ -n "${{ secrets.GKE_REGION }}" ]; then
+            gcloud container clusters get-credentials "${{ secrets.GKE_CLUSTER }}" --region "${{ secrets.GKE_REGION }}"
+          else
+            gcloud container clusters get-credentials "${{ secrets.GKE_CLUSTER }}" --zone "${{ secrets.GKE_ZONE }}"
+          fi
+
+      - name: Deploy manifests
+        run: |
+          # Substitute PROJECT_ID into the deployment image reference, then apply
+          sed "s/PROJECT_ID/${PROJECT_ID}/g" k8s/deployment.yaml | kubectl apply -f -
+          kubectl apply -f k8s/service.yaml
+
+      - name: Show rollout status
+        run: |
+          kubectl rollout status deploy/fancy-app --timeout=120s
+          kubectl get svc fancy-app -o wide
