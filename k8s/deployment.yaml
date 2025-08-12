@@ -1,0 +1,30 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: fancy-app
+  labels:
+    app: fancy-app
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: fancy-app
+  template:
+    metadata:
+      labels:
+        app: fancy-app
+    spec:
+      containers:
+        - name: web
+          # PROJECT_ID will be substituted by the deploy workflow
+          image: us-central1-docker.pkg.dev/PROJECT_ID/node-app-repo/fancy-app:latest
+          ports:
+            - containerPort: 8080
+          readinessProbe:
+            httpGet: { path: /api/healthz, port: 8080 }
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          livenessProbe:
+            httpGet: { path: /api/healthz, port: 8080 }
+            initialDelaySeconds: 10
+            periodSeconds: 10
