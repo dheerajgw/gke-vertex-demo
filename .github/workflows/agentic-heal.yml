@@ -7,7 +7,7 @@ on:
 
 jobs:
   heal:
-    if: ${{ github.event_name == 'workflow_dispatch' || (github.event.workflow_run github.event.workflow_run.conclusion == 'failure'github.event.workflow_run.conclusion == 'failure' github.event.workflow_run.conclusion == 'failure') }}
+    if: ${{ github.event_name == 'workflow_dispatch' || (github.event.workflow_run && github.event.workflow_run.conclusion == 'failure') }}
     runs-on: ubuntu-latest
     permissions:
       contents: write
