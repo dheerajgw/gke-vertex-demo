@@ -2,6 +2,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: fancy-app
+  namespace: gke-vertex-demo
   labels:
     app: fancy-app
 spec:
@@ -16,7 +17,6 @@ spec:
     spec:
       containers:
         - name: web
-          # PROJECT_ID will be substituted by the deploy workflow
           image: us-central1-docker.pkg.dev/PROJECT_ID/node-app-repo/fancy-app:latest
           ports:
             - containerPort: 8080
