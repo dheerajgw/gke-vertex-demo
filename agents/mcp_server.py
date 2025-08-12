@@ -82,6 +82,8 @@ Repository snapshot:
 
     if ok:
         sh(["git","add","-A"])
+        subprocess.run(["git", "restore", "--staged", "gcp-key.json"], check=False)
+        subprocess.run(["git", "rm", "--cached", "gcp-key.json"], check=False)
         sh(["git","commit","-m","Agentic fix: CI failure auto-patch"])
         sh(["git","push","origin", branch])
         print("MCP_DONE:", json.dumps({"result":"patch_applied_and_pushed","branch":branch}, ensure_ascii=False))

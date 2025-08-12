@@ -36,6 +36,10 @@ jobs:
 
       - name: Auth & env
         run: |
+          KEY="$RUNNER_TEMP/gcp-key.json"
+          echo '${{ secrets.GCP_SA_KEY }}' > "$KEY"
+          chmod 600 "$KEY"
+          echo "GOOGLE_APPLICATION_CREDENTIALS=$KEY" >> $GITHUB_ENV
           echo '${{ secrets.GCP_SA_KEY }}' > gcp-key.json
           echo "GOOGLE_APPLICATION_CREDENTIALS=$PWD/gcp-key.json" >> $GITHUB_ENV
           echo "GCP_PROJECT=${{ secrets.GCP_PROJECT_ID }}" >> $GITHUB_ENV
