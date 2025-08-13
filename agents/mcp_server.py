@@ -81,12 +81,27 @@ Repository snapshot:
         ok = False
 
     if ok:
+        #Stage all changes
         sh(["git","add","-A"])
+        # Ensure no credentials are staged
         subprocess.run(["git", "restore", "--staged", "gcp-key.json"], check=False)
         subprocess.run(["git", "rm", "--cached", "gcp-key.json"], check=False)
         sh(["git","commit","-m","Agentic fix: CI failure auto-patch"])
         sh(["git","push","origin", branch])
-        print("MCP_DONE:", json.dumps({"result":"patch_applied_and_pushed","branch":branch}, ensure_ascii=False))
+        # Try to auto-merge into main and push
+        try:
+            sh(["git","fetch","origin","main"])
+            sh(["git","checkout","main"])
+            sh(["git","pull","--ff-only","origin","main"])
+            sh(["git","merge","--no-ff","-m","Agentic Heal: auto-merge fix", branch])
+            sh(["git","push","origin","main"])
+            print("MCP_DONE:", json.dumps(
+                {"result":"merged_to_main","branch":branch}, ensure_ascii=False))
+        except subprocess.CalledProcessError:
+            # If protected branch prevents direct push, fall back to PR
+            open("branch_name.txt","w").write(branch)
+            print("MCP_DONE:", json.dumps(
+                {"result":"branch_pushed_need_pr","branch":branch}, ensure_ascii=False))
     else:
         print("MCP_DONE:", json.dumps({"result":"patch_failed_tests"}, ensure_ascii=False))
         raise SystemExit(3)
