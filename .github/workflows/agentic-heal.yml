@@ -14,11 +14,25 @@ jobs:
       pull-requests: write
 
     steps:
+      # Checkout the exact SHA that failed (workflow_run) or the current ref (manual)
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
 
-      - name: Download CI logs
+      # Download CI logs from the *failed CI run* (only when triggered by workflow_run)
+      - name: Download CI logs (from failed CI run)
+        if: ${{ github.event_name == 'workflow_run' }}
+        uses: actions/download-artifact@v4
+        with:
+          name: ci-logs
+          path: ./ci-logs
+          run-id: ${{ github.event.workflow_run.id }}
+        continue-on-error: true
+
+      # Fallback for manual runs (no run-id context)
+      - name: Download CI logs (manual fallback)
+        if: ${{ github.event_name == 'workflow_dispatch' }}
         uses: actions/download-artifact@v4
         with:
           name: ci-logs
@@ -40,8 +54,6 @@ jobs:
           echo '${{ secrets.GCP_SA_KEY }}' > "$KEY"
           chmod 600 "$KEY"
           echo "GOOGLE_APPLICATION_CREDENTIALS=$KEY" >> $GITHUB_ENV
-          echo '${{ secrets.GCP_SA_KEY }}' > gcp-key.json
-          echo "GOOGLE_APPLICATION_CREDENTIALS=$PWD/gcp-key.json" >> $GITHUB_ENV
           echo "GCP_PROJECT=${{ secrets.GCP_PROJECT_ID }}" >> $GITHUB_ENV
           echo "GCP_LOCATION=${{ secrets.GCP_LOCATION }}" >> $GITHUB_ENV
           echo "VERTEX_MODEL=${{ secrets.VERTEX_MODEL }}" >> $GITHUB_ENV
