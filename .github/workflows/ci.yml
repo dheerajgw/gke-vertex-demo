@@ -7,6 +7,9 @@ on:
 jobs:
   test_build:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read    # allow other workflows to download artifacts from this run
     defaults:
       run:
         working-directory: app
