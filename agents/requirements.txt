@@ -1,0 +1,3 @@
+google-cloud-aiplatform>=1.66.0
+google-auth
+pyyaml
