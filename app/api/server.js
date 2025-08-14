@@ -11,7 +11,7 @@ app.get('/api/version', (_req,res)=> {
 
 // Healthy version (we'll break this later to trigger auto-heal)
 app.get('/api/healthz', (_req,res)=> {
-  res.json({ status:'ok', messege:'Hello from GKE Vertex PoC!' })
+  res.json({ status:'ok', message:'Hello from GKE Vertex PoC!' })
 })
 
 app.get('*', (_req,res)=> {
