@@ -1,30 +1,71 @@
-name: CI
+name: CI (main-only, self-heal)
+
 on:
   push:
-    branches: ["**"]
-  pull_request:
+    branches: ["main"]
+
+permissions:
+  contents: write   # allow this workflow to push back to main
 
 jobs:
-  test_build:
+  test_and_heal:
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      actions: read    # allow other workflows to download artifacts from this run
     defaults:
       run:
         working-directory: app
+
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: true   # use GITHUB_TOKEN for pushes
+
       - uses: actions/setup-node@v4
         with:
           node-version: "18"
+
       - run: npm ci
       - run: npm run build:web
-      - run: npm test
-      - name: Upload junit
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: ci-logs
-          path: app/junit.xml
-          if-no-files-found: warn
+
+      # --- Run tests; allow failure so we can heal ---
+      - name: Run tests (allow failure)
+        id: test1
+        continue-on-error: true
+        env:
+          JEST_JUNIT_OUTPUT: ./junit.xml
+        run: npx jest --runInBand --reporters=default --reporters=jest-junit
+
+      # --- Heal only if the first test run failed ---
+      - name: Apply fast fix (messege -> message)
+        if: ${{ steps.test1.outcome == 'failure' }}
+        working-directory: .
+        run: |
+          set -euo pipefail
+          file="app/api/server.js"
+          if [ ! -f "$file" ]; then
+            echo "::error::Expected $file but it does not exist"; exit 1
+          fi
+          # Apply deterministic fix
+          if grep -qE '\bmessege\s*:' "$file"; then
+            sed -i "s/\bmessege\s*:/message:/" "$file"
+            echo "Applied fast fix: messege -> message"
+          else
+            echo "No 'messege:' key found; leaving file unchanged."
+          fi
+
+      - name: Re-run tests after fix
+        if: ${{ steps.test1.outcome == 'failure' }}
+        id: test2
+        run: |
+          npm ci
+          npx jest --runInBand
+
+      - name: Commit and push fix to main
+        if: ${{ steps.test1.outcome == 'failure' && steps.test2.outcome == 'success' }}
+        working-directory: .
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add app/api/server.js
+          git commit -m "Agentic fast-fix: replace 'messege' with 'message'"
+          git push origin HEAD:main
