@@ -1,64 +1,88 @@
 name: CD
 
 on:
+  # Run CD only after CI (self-heal) completes successfully
   workflow_run:
-    workflows: ["CI (main-only, self-heal)"]
-    types:
-      - completed
+    workflows: ["CI (main-only, self-heal)"]   # <-- must exactly match your CI workflow name
+    types: [completed]
 
 jobs:
   deploy:
     if: ${{ github.event.workflow_run.conclusion == 'success' }}
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+
+    env:
+      # If you don't set AR_REGION as a repo secret, the scripts below fall back to us-central1.
+      AR_REGION: ${{ secrets.AR_REGION }}
+      PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
+      REPO_NAME: node-app-repo
+      IMAGE_NAME: fancy-app
+      IMAGE_TAG: ${{ github.sha }}
 
     steps:
       - uses: actions/checkout@v4
 
-      # Authenticate to GCP
+      # Authenticate to GCP using your service account JSON in repo secret GCP_SA_KEY
+      - name: Auth to GCP
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+
       - name: Setup gcloud
         uses: google-github-actions/setup-gcloud@v2
-        with:
-          service_account_key: ${{ secrets.GCP_SA_KEY }}
-          project_id: ${{ secrets.GCP_PROJECT }}
-          export_default_credentials: true
 
-      # Configure Docker to push to Artifact Registry
-      - name: Configure Docker auth
-        run: gcloud auth configure-docker ${{ secrets.AR_REGION }}-docker.pkg.dev --quiet
-
-      # Build & push container
-      - name: Build & Push Image
-        run: |
-          IMAGE="${{ secrets.AR_REGION }}-docker.pkg.dev/${{ secrets.GCP_PROJECT }}/${{ secrets.REPO_NAME }}/${{ secrets.IMAGE_NAME }}"
-          docker build -t $IMAGE:${{ github.sha }} ./app
-          docker push $IMAGE:${{ github.sha }}
-          echo "IMAGE_URI=$IMAGE:${{ github.sha }}" >> $GITHUB_ENV
-
-      # Install GKE kubectl auth plugin
+      # Install the GKE kubectl auth plugin via APT (component manager is disabled on GitHub runners)
       - name: Install GKE auth plugin
         run: |
           set -euo pipefail
-          echo "deb [signed-by=/usr/share/keyrings/cloud.google.gpg] https://packages.cloud.google.com/apt cloud-sdk main" | sudo tee /etc/apt/sources.list.d/google-cloud-sdk.list >/dev/null
+          echo "deb [signed-by=/usr/share/keyrings/cloud.google.gpg] https://packages.cloud.google.com/apt cloud-sdk main" \
+            | sudo tee /etc/apt/sources.list.d/google-cloud-sdk.list >/dev/null
+          sudo apt-get update
           sudo apt-get install -y apt-transport-https ca-certificates gnupg curl
           if [ ! -f /usr/share/keyrings/cloud.google.gpg ]; then
-            curl -s https://packages.cloud.google.com/apt/doc/apt-key.gpg | sudo gpg --dearmor -o /usr/share/keyrings/cloud.google.gpg
+            curl -s https://packages.cloud.google.com/apt/doc/apt-key.gpg \
+              | sudo gpg --dearmor -o /usr/share/keyrings/cloud.google.gpg
             sudo apt-get update
           fi
-          sudo apt-get update
           sudo apt-get install -y google-cloud-sdk-gke-gcloud-auth-plugin
           echo "USE_GKE_GCLOUD_AUTH_PLUGIN=True" >> $GITHUB_ENV
 
-      # Connect to cluster
+      # Configure Docker for Artifact Registry (all registries — avoids region issues)
+      - name: Configure Docker auth
+        run: gcloud auth configure-docker --quiet
+
+      # Build & push image to Artifact Registry
+      - name: Build & Push Image
+        working-directory: app
+        run: |
+          set -euo pipefail
+          AR="${AR_REGION:-us-central1}"
+          IMAGE="${AR}-docker.pkg.dev/${PROJECT_ID}/${REPO_NAME}/${IMAGE_NAME}"
+          echo "Building and pushing ${IMAGE}:latest and ${IMAGE}:${IMAGE_TAG}"
+          docker build -t "${IMAGE}:latest" -t "${IMAGE}:${IMAGE_TAG}" .
+          docker push "${IMAGE}:latest"
+          docker push "${IMAGE}:${IMAGE_TAG}"
+          echo "IMAGE_URI=${IMAGE}:${IMAGE_TAG}" >> $GITHUB_ENV
+
+      # Get kube credentials for your cluster (set either GKE_REGION or GKE_ZONE in secrets)
       - name: Get GKE credentials
         run: |
-          gcloud container clusters get-credentials ${{ secrets.GKE_CLUSTER }} \
-            --region ${{ secrets.GCP_LOCATION }} \
-            --project ${{ secrets.GCP_PROJECT }}
+          if [ -n "${{ secrets.GKE_REGION }}" ]; then
+            gcloud container clusters get-credentials "${{ secrets.GKE_CLUSTER }}" --region "${{ secrets.GKE_REGION }}"
+          else
+            gcloud container clusters get-credentials "${{ secrets.GKE_CLUSTER }}" --zone "${{ secrets.GKE_ZONE }}"
+          fi
 
-      # Deploy to GKE
+      # Deploy manifests (deployment.yaml expects PROJECT_ID and uses :latest tag)
       - name: Deploy manifests
         run: |
-          sed "s|PROJECT_ID|${{ secrets.GCP_PROJECT }}|g; s|IMAGE_URI|$IMAGE_URI|g" k8s/deployment.yaml | kubectl apply -f -
+          sed "s/PROJECT_ID/${PROJECT_ID}/g" k8s/deployment.yaml | kubectl apply -f -
           kubectl apply -f k8s/service.yaml
-          kubectl rollout status deployment/fancy-app --timeout=90s
 
+      - name: Show rollout & external IP
+        run: |
+          kubectl -n gke-vertex-demo rollout status deploy/fancy-app
+          kubectl -n gke-vertex-demo get svc fancy-app -o wide
