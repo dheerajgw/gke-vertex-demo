@@ -1,6 +1,7 @@
 name: CD
 
 on:
+  # Trigger only after CI (self-heal) succeeds
   workflow_run:
     workflows: ["CI (main-only, self-heal)"]
     types: [completed]
@@ -23,24 +24,30 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Auth to GCP with your SA key (JSON in secret GCP_SA_KEY)
       - uses: google-github-actions/auth@v2
         with:
           credentials_json: ${{ secrets.GCP_SA_KEY }}
-      # Install and enable the GKE kubectl auth plugin
-      - name: Install GKE auth plugin
-        run: gcloud components install gke-gcloud-auth-plugin -q
-      
-      - name: Enable plugin for kubectl
-        run: echo "USE_GKE_GCLOUD_AUTH_PLUGIN=True" >> $GITHUB_ENV
 
       - uses: google-github-actions/setup-gcloud@v2
 
-      - name: Configure AR Docker auth
+      # Install the GKE kubectl auth plugin via apt (component manager is disabled on runners)
+      - name: Install GKE auth plugin
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y google-cloud-cli-gke-gcloud-auth-plugin
+
+      # Make kubectl use the plugin
+      - name: Enable kubectl auth plugin
+        run: echo "USE_GKE_GCLOUD_AUTH_PLUGIN=True" >> $GITHUB_ENV
+
+      - name: Configure Artifact Registry auth
         run: gcloud auth configure-docker ${AR_REGION}-docker.pkg.dev -q
 
-      - name: Build & Push Image
+      - name: Build & push container image
         working-directory: app
         run: |
+          set -euo pipefail
           IMAGE="${AR_REGION}-docker.pkg.dev/${PROJECT_ID}/${REPO_NAME}/${IMAGE_NAME}"
           docker build -t "${IMAGE}:latest" -t "${IMAGE}:${IMAGE_TAG}" .
           docker push "${IMAGE}:latest"
@@ -48,6 +55,8 @@ jobs:
 
       - name: Get GKE credentials
         run: |
+          # Provide one of these in repo secrets:
+          #   GKE_REGION (for regional clusters) OR GKE_ZONE (for zonal clusters)
           if [ -n "${{ secrets.GKE_REGION }}" ]; then
             gcloud container clusters get-credentials "${{ secrets.GKE_CLUSTER }}" --region "${{ secrets.GKE_REGION }}"
           else
@@ -56,10 +65,11 @@ jobs:
 
       - name: Deploy manifests
         run: |
+          # Substitute PROJECT_ID into the image reference, then apply
           sed "s/PROJECT_ID/${PROJECT_ID}/g" k8s/deployment.yaml | kubectl apply -f -
           kubectl apply -f k8s/service.yaml
 
-      - name: Show rollout status
+      - name: Show rollout & service
         run: |
           kubectl -n gke-vertex-demo rollout status deploy/fancy-app
           kubectl -n gke-vertex-demo get svc fancy-app -o wide
