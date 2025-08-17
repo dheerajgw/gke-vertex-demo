@@ -38,16 +38,21 @@ jobs:
       - name: Install GKE auth plugin
         run: |
           set -euo pipefail
-          echo "deb [signed-by=/usr/share/keyrings/cloud.google.gpg] https://packages.cloud.google.com/apt cloud-sdk main" \
+          # 1) Create keyring dir and import Google Cloud APT key (Ubuntu 24.04-safe)
+          sudo install -m 0755 -d /etc/apt/keyrings
+          curl -fsSL https://packages.cloud.google.com/apt/doc/apt-key.gpg \
+            | sudo gpg --dearmor -o /etc/apt/keyrings/google-cloud-archive-keyring.gpg
+          sudo chmod 0644 /etc/apt/keyrings/google-cloud-archive-keyring.gpg
+
+          # 2) Add Cloud SDK repo referencing the keyring
+          echo "deb [signed-by=/etc/apt/keyrings/google-cloud-archive-keyring.gpg] https://packages.cloud.google.com/apt cloud-sdk main" \
             | sudo tee /etc/apt/sources.list.d/google-cloud-sdk.list >/dev/null
+
+          # 3) Update & install the GKE kubectl auth plugin
           sudo apt-get update
-          sudo apt-get install -y apt-transport-https ca-certificates gnupg curl
-          if [ ! -f /usr/share/keyrings/cloud.google.gpg ]; then
-            curl -s https://packages.cloud.google.com/apt/doc/apt-key.gpg \
-              | sudo gpg --dearmor -o /usr/share/keyrings/cloud.google.gpg
-            sudo apt-get update
-          fi
           sudo apt-get install -y google-cloud-sdk-gke-gcloud-auth-plugin
+
+          # 4) Tell kubectl to use the plugin
           echo "USE_GKE_GCLOUD_AUTH_PLUGIN=True" >> $GITHUB_ENV
 
       # Configure Docker for Artifact Registry (all registries — avoids region issues)
