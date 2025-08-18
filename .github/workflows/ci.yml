@@ -3,74 +3,36 @@ name: CI (main-only, self-heal)
 on:
   push:
     branches: ["main"]
-
-permissions:
-  contents: write   # allow this workflow to push the fix back to main
+  pull_request:
 
 jobs:
-  test_and_heal:
+  test_build:
     runs-on: ubuntu-latest
     defaults:
       run:
         working-directory: app
-
     steps:
       - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-          persist-credentials: true
 
       - uses: actions/setup-node@v4
         with:
           node-version: "18"
 
-      - run: npm ci
-      - run: npm run build:web
+      - name: Install deps
+        run: npm ci
 
-      # 1) First test run — DO NOT FAIL THE JOB (allow heal to run)
-      - name: Run tests (allow failure)
-        id: test1
-        continue-on-error: true
+      - name: Build web
+        run: npm run build:web
+
+      - name: Test with JUnit reporter
         env:
           JEST_JUNIT_OUTPUT: ./junit.xml
         run: npx jest --runInBand --reporters=default --reporters=jest-junit
 
-      # 2) Apply deterministic fast fix ONLY if first tests failed
-      - name: Apply fast fix (messege -> message)
-        if: ${{ steps.test1.outcome == 'failure' }}
-        working-directory: .
-        run: |
-          set -euo pipefail
-          file="app/api/server.js"
-          if [ ! -f "$file" ]; then
-            echo "::error::Expected $file but it does not exist"; exit 1
-          fi
-          # Replace any `messege:` key with `message:`
-          sed -i -E 's/\bmessege\s*:/message:/g' "$file"
-          echo "Applied fast fix: messege -> message"
-
-      # 3) Re-run tests after the fix
-      - name: Re-run tests after fix
-        if: ${{ steps.test1.outcome == 'failure' }}
-        id: test2
-        run: |
-          npm ci
-          npx jest --runInBand
-
-      # 4) Commit & push the fix back to main (only if fixed tests passed)
-      - name: Commit and push fix to main
-        if: ${{ steps.test1.outcome == 'failure' && steps.test2.outcome == 'success' }}
-        working-directory: .
-        run: |
-          git config user.name  "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add app/api/server.js
-          git commit -m "Agentic fast-fix: replace 'messege' with 'message'"
-          git push origin HEAD:main
-
-      # 5) If first tests failed and fix DIDN'T pass, fail the job
-      - name: Fail if heal didn’t work
-        if: ${{ steps.test1.outcome == 'failure' && steps.test2.outcome != 'success' }}
-        run: |
-          echo "::error::Heal failed to make tests pass"
-          exit 1
+      - name: Upload JUnit
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ci-logs
+          path: app/junit.xml
+          if-no-files-found: warn
