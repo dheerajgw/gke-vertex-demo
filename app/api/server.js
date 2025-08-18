@@ -1,24 +1,26 @@
-const express = require('express')
-const path = require('path')
-const app = express()
-const port = process.env.PORT || 8080
+const express = require('express');
+const path = require('path');
 
-app.use(express.static(path.join(__dirname, '..', 'web', 'dist')))
+const app = express();
+const PORT = process.env.PORT || 8080;
 
-app.get('/api/version', (_req,res)=> {
-  res.json({ name:'gke-vertex-fancy-app', version:'1.0.0' })
-})
+// 1) Serve the built SPA from web/dist  ⬅️ THIS IS IMPORTANT
+app.use(express.static(path.join(__dirname, '..', 'web', 'dist')));
 
-// Healthy version (we'll break this later to trigger auto-heal)
-app.get('/api/healthz', (_req,res)=> {
-  res.json({ status:'ok', message:'Hello from GKE Vertex PoC!' })
-})
+// --- your APIs ---
+app.get('/api/healthz', (req, res) => {
+  res.json({ status: 'ok', message: 'Hello from GKE Vertex PoC!' });
+});
 
-app.get('*', (_req,res)=> {
-  res.sendFile(path.join(__dirname, '..', 'web', 'dist', 'index.html'))
-})
+// 2) Catch-all: send index.html so SPA routes work
+app.get('*', (req, res) => {
+  res.sendFile(path.join(__dirname, '..', 'web', 'dist', 'index.html'));
+});
 
 if (require.main === module) {
-  app.listen(port, ()=> console.log(`App http://0.0.0.0:${port}`))
+  app.listen(PORT, () => {
+    console.log(`listening on :${PORT}`);
+  });
 }
-module.exports = app
+
+module.exports = app;
