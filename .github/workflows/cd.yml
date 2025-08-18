@@ -43,7 +43,7 @@ jobs:
           print("SERVICE ACCOUNT:", data.get("client_email"))
           PY
 
-      - name: Sanity: list Artifact Registry repos
+      - name: Sanity list Artifact Registry repos
         run: |
           AR="${AR_REGION:-}"
           AR="${AR:-us-central1}"
