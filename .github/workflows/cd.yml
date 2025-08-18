@@ -1,9 +1,9 @@
 name: CD
 
 on:
-  # Run CD only after CI (self-heal) completes successfully
+  # CD runs after CI completes successfully
   workflow_run:
-    workflows: ["CI (main-only, self-heal)"]   # <-- must exactly match your CI workflow name
+    workflows: ["CI (main-only, self-heal)"]  # <-- MUST match your CI workflow name exactly
     types: [completed]
 
 jobs:
@@ -15,17 +15,15 @@ jobs:
       id-token: write
 
     env:
-      # If you don't set AR_REGION as a repo secret, the scripts below fall back to us-central1.
-      AR_REGION: ${{ secrets.AR_REGION }}
       PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
       REPO_NAME: node-app-repo
       IMAGE_NAME: fancy-app
-      IMAGE_TAG: ${{ github.sha }}
+      AR_REGION: ${{ secrets.AR_REGION }}   # optional; we fallback to us-central1 in bash
 
     steps:
       - uses: actions/checkout@v4
 
-      # Authenticate to GCP using your service account JSON in repo secret GCP_SA_KEY
+      # Authenticate to GCP with your service account JSON stored in secret GCP_SA_KEY
       - name: Auth to GCP
         uses: google-github-actions/auth@v2
         with:
@@ -34,54 +32,86 @@ jobs:
       - name: Setup gcloud
         uses: google-github-actions/setup-gcloud@v2
 
-      # Install the GKE kubectl auth plugin via APT (component manager is disabled on GitHub runners)
+      # Install the GKE kubectl auth plugin (Ubuntu 24.04-safe keyring flow)
       - name: Install GKE auth plugin
         run: |
           set -euo pipefail
-          # 1) Create keyring dir and import Google Cloud APT key (Ubuntu 24.04-safe)
           sudo install -m 0755 -d /etc/apt/keyrings
           curl -fsSL https://packages.cloud.google.com/apt/doc/apt-key.gpg \
             | sudo gpg --dearmor -o /etc/apt/keyrings/google-cloud-archive-keyring.gpg
           sudo chmod 0644 /etc/apt/keyrings/google-cloud-archive-keyring.gpg
-
-          # 2) Add Cloud SDK repo referencing the keyring
           echo "deb [signed-by=/etc/apt/keyrings/google-cloud-archive-keyring.gpg] https://packages.cloud.google.com/apt cloud-sdk main" \
             | sudo tee /etc/apt/sources.list.d/google-cloud-sdk.list >/dev/null
-
-          # 3) Update & install the GKE kubectl auth plugin
           sudo apt-get update
           sudo apt-get install -y google-cloud-sdk-gke-gcloud-auth-plugin
-
-          # 4) Tell kubectl to use the plugin
           echo "USE_GKE_GCLOUD_AUTH_PLUGIN=True" >> $GITHUB_ENV
 
-      # Configure Docker for Artifact Registry (all registries — avoids region issues)
+      # Configure Docker for all registries (simpler than per-region)
       - name: Configure Docker auth
         run: gcloud auth configure-docker --quiet
 
-      # Build & push image to Artifact Registry
+      # Diagnostics (helpful if pushes fail)
+      - name: gcloud auth context (diagnostics)
+        run: |
+          gcloud auth list
+          gcloud config list
+
+      - name: Print SA email from credentials
+        run: |
+          python - <<'PY'
+          import os, json, glob
+          path = os.environ.get('GOOGLE_APPLICATION_CREDENTIALS') or (glob.glob('**/*.json', recursive=True)[:1][0])
+          with open(path) as f:
+              data = json.load(f)
+          print("CREDENTIAL FILE:", path)
+          print("SERVICE ACCOUNT:", data.get("client_email"))
+          PY
+
+      - name: Sanity: list Artifact Registry repos
+        run: |
+          AR="${AR_REGION:-}"
+          AR="${AR:-us-central1}"
+          gcloud artifacts repositories list --location="$AR" || true
+          gcloud artifacts repositories describe "${REPO_NAME}" \
+            --location="$AR" \
+            --project="${PROJECT_ID}"
+
+      # Explicit docker login to Artifact Registry (fail early if auth is wrong)
+      - name: Artifact Registry docker login
+        run: |
+          AR="${AR_REGION:-}"
+          AR="${AR:-us-central1}"
+          HOST="${AR}-docker.pkg.dev"
+          echo "Logging in to ${HOST}"
+          gcloud auth print-access-token | docker login -u oauth2accesstoken --password-stdin "https://${HOST}"
+
+      # Build & Push image to Artifact Registry
       - name: Build & Push Image
         working-directory: app
         run: |
           set -euo pipefail
-          AR="${AR_REGION:-us-central1}"
+          AR="${AR_REGION:-}"
+          AR="${AR:-us-central1}"
           IMAGE="${AR}-docker.pkg.dev/${PROJECT_ID}/${REPO_NAME}/${IMAGE_NAME}"
-          echo "Building and pushing ${IMAGE}:latest and ${IMAGE}:${IMAGE_TAG}"
-          docker build -t "${IMAGE}:latest" -t "${IMAGE}:${IMAGE_TAG}" .
+          echo "Building and pushing ${IMAGE}:latest and ${IMAGE}:${GITHUB_SHA}"
+          docker build -t "${IMAGE}:latest" -t "${IMAGE}:${GITHUB_SHA}" .
           docker push "${IMAGE}:latest"
-          docker push "${IMAGE}:${IMAGE_TAG}"
-          echo "IMAGE_URI=${IMAGE}:${IMAGE_TAG}" >> $GITHUB_ENV
+          docker push "${IMAGE}:${GITHUB_SHA}"
+          echo "IMAGE_URI=${IMAGE}:${GITHUB_SHA}" >> $GITHUB_ENV
 
-      # Get kube credentials for your cluster (set either GKE_REGION or GKE_ZONE in secrets)
+      # Get GKE credentials (use REGION if provided; else ZONE)
       - name: Get GKE credentials
         run: |
-          if [ -n "${{ secrets.GKE_REGION }}" ]; then
-            gcloud container clusters get-credentials "${{ secrets.GKE_CLUSTER }}" --region "${{ secrets.GKE_REGION }}"
+          CLUSTER="${{ secrets.GKE_CLUSTER }}"
+          REG="${{ secrets.GKE_REGION }}"
+          ZONE="${{ secrets.GKE_ZONE }}"
+          if [ -n "$REG" ]; then
+            gcloud container clusters get-credentials "$CLUSTER" --region "$REG"
           else
-            gcloud container clusters get-credentials "${{ secrets.GKE_CLUSTER }}" --zone "${{ secrets.GKE_ZONE }}"
+            gcloud container clusters get-credentials "$CLUSTER" --zone "$ZONE"
           fi
 
-      # Deploy manifests (deployment.yaml expects PROJECT_ID and uses :latest tag)
+      # Deploy manifests (deployment.yaml expects PROJECT_ID; image tag uses :latest there)
       - name: Deploy manifests
         run: |
           sed "s/PROJECT_ID/${PROJECT_ID}/g" k8s/deployment.yaml | kubectl apply -f -
@@ -91,3 +121,4 @@ jobs:
         run: |
           kubectl -n gke-vertex-demo rollout status deploy/fancy-app
           kubectl -n gke-vertex-demo get svc fancy-app -o wide
+
