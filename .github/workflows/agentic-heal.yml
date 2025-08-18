@@ -16,18 +16,17 @@ jobs:
     runs-on: ubuntu-latest
 
     permissions:
-      actions: read          # to read artifacts
-      contents: write        # to push branch with fix
-      pull-requests: write   # to open a PR
+      actions: read          # read CI artifacts
+      contents: write        # push fix branch
+      pull-requests: write   # open PR
 
     env:
-      # Common env (used by the healer and PR creation)
       GCP_PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
       GCP_LOCATION:   ${{ secrets.GCP_LOCATION }}
       VERTEX_MODEL:   ${{ secrets.VERTEX_MODEL }}
 
     steps:
-      # 1) Check out the exact SHA that failed (if workflow_run) or current ref (manual)
+      # 1) Checkout the exact SHA that failed (workflow_run) or the current ref (manual)
       - name: Checkout failed commit (or current)
         uses: actions/checkout@v4
         with:
@@ -39,7 +38,7 @@ jobs:
         if: ${{ github.event_name == 'workflow_run' }}
         uses: actions/download-artifact@v4
         with:
-          name: ci-logs                 # <-- must match the name used in CI
+          name: ci-logs                 # <-- must match CI upload name
           path: ./ci-logs
           run-id: ${{ github.event.workflow_run.id }}
         continue-on-error: true
@@ -59,7 +58,7 @@ jobs:
         with:
           credentials_json: ${{ secrets.GCP_SA_KEY }}
 
-      # (Optional, but useful for debugging creds / project)
+      # (Optional) gcloud info, helpful when debugging credentials/project
       - name: Setup gcloud (debug only)
         uses: google-github-actions/setup-gcloud@v2
 
@@ -68,53 +67,62 @@ jobs:
           gcloud auth list || true
           gcloud config list || true
 
-      # 4) Python and env for healer
+      # 4) Python & deps for healer
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+
+      - name: Install deps (Vertex SDK)
+        run: python -m pip install -r agents/requirements.txt
 
       - name: Set bot identity env
         run: |
           echo "GH_BOT_ACTOR=agentic-bot" >> $GITHUB_ENV
           echo "GH_BOT_EMAIL=agentic-bot@example.com" >> $GITHUB_ENV
 
-      # 5) Run your Vertex-powered healer (stdlib only)
+      # 5) Run your Vertex-powered healer (diff -> apply -> test -> push)
       - name: Run Agentic Healer (Vertex + fallbacks)
         run: |
           python agents/mcp_server.py
 
-      # 6) Compute the fix branch name the healer uses: auto-fix/<sha8>
+      # 6) Compute the fix branch as an output (simple, reusable)
       - name: Compute auto-fix branch
         id: af
         run: |
-          SHA8="$(git rev-parse --short HEAD)"
-          echo "sha8=${SHA8}" >> $GITHUB_OUTPUT
-          echo "branch=auto-fix/${SHA8}" >> $GITHUB_OUTPUT
-          echo "Computed auto-fix branch: auto-fix/${SHA8}"
+          echo "branch=auto-fix/$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
+          echo "Computed branch: auto-fix/$(git rev-parse --short HEAD)"
 
-      # 7) Open a PR to main if the branch exists (healer only pushes if tests pass)
-      - name: Open PR to main
+      # 7) Open a PR to main if the branch exists (healer pushes only if tests pass)
+      - name: Open PR to main (if branch exists)
         if: ${{ always() }}
         uses: actions/github-script@v7
         with:
           script: |
-            const branch = `auto-fix/${{ steps.af.outputs.sha8 }}`;
+            const branch = `${{ steps.af.outputs.branch }}`;
+            const { owner, repo } = context.repo;
+            const base = 'main';
+
+            // Check if branch exists in the repo (created/pushed by healer)
             try {
-              // Check if branch exists on origin
-              const { execSync } = require('node:child_process');
-              execSync(`git ls-remote --exit-code --heads origin ${branch}`, { stdio: 'inherit' });
-
-              // Create PR
-              const { owner, repo } = context.repo;
-              const title = `Agentic fix: auto-heal for ${branch}`;
-              const body  = 'This PR was opened automatically by Agentic-Heal after a CI failure. It includes changes that made tests pass in CI. Please review and merge.';
-              const base  = 'main';
-              const head  = branch;
-
-              const pr = await github.rest.pulls.create({
-                owner, repo, title, head, base, body
-              });
-              core.info(`Opened PR #${pr.data.number} from ${head} -> ${base}`);
+              await github.rest.git.getRef({ owner, repo, ref: `heads/${branch}` });
             } catch (e) {
-              core.warning(`No auto-fix branch found or PR creation failed: ${e.message}`);
+              core.info(`Auto-fix branch not found (${branch}); skipping PR. Details: ${e.message}`);
+              return;
+            }
+
+            // Avoid duplicate PRs
+            const existing = await github.rest.pulls.list({
+              owner, repo, head: `${owner}:${branch}`, base, state: 'open'
+            });
+            if (existing.data.length > 0) {
+              core.info(`PR already exists: #${existing.data[0].number}`);
+              return;
+            }
+
+            const title = `Agentic fix: auto-heal for ${branch}`;
+            const body  = 'Opened automatically by Agentic-Heal after a CI failure. Includes changes that made tests pass in CI. Please review and merge.';
+
+            const pr = await github.rest.pulls.create({ owner, repo, title, head: branch, base, body });
+            core.info(`Opened PR #${pr.data.number} from ${branch} -> ${base}`);
+

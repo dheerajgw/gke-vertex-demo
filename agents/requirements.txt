@@ -1,3 +1,7 @@
 google-cloud-aiplatform>=1.66.0
 google-auth
 pyyaml
+vertexai>=1.71.1
+google-cloud-aiplatform>=1.66.0
+google-auth>=2.29.0
+google-api-core>=2.19.0
