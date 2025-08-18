@@ -8,7 +8,7 @@ const PORT = process.env.PORT || 8080;
 app.use(express.static(path.join(__dirname, '..', 'web', 'dist')));
 
 // --- your APIs ---
-app.get('/api/healthz', (req, res) => {
+app.get('/api/healthzz', (req, res) => {
   res.json({ status: 'ok', message: 'Hello from GKE Vertex PoC!' });
 });
 
