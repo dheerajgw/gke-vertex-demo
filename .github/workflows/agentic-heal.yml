@@ -1,39 +1,50 @@
 name: Agentic-Heal
 
 on:
+  # Auto-trigger when CI completes; we only run if CI concluded 'failure' (see job.if)
   workflow_run:
-    # IMPORTANT: this must match your CI workflow's 'name:' EXACTLY
-    workflows: ["CI (main-only, self-heal)"]
+    workflows: ["CI (main-only, self-heal)"]  # <-- must match your CI 'name:' exactly
     types: [completed]
+
+  # Allow manual runs too (handy for testing)
   workflow_dispatch:
 
 jobs:
   heal:
+    # Run if: (manual) OR (triggered by CI run AND CI concluded failure)
     if: ${{ github.event_name == 'workflow_dispatch' || (github.event.workflow_run && github.event.workflow_run.conclusion == 'failure') }}
     runs-on: ubuntu-latest
+
     permissions:
-      actions: read
-      contents: write
-      pull-requests: write
+      actions: read          # to read artifacts
+      contents: write        # to push branch with fix
+      pull-requests: write   # to open a PR
+
+    env:
+      # Common env (used by the healer and PR creation)
+      GCP_PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
+      GCP_LOCATION:   ${{ secrets.GCP_LOCATION }}
+      VERTEX_MODEL:   ${{ secrets.VERTEX_MODEL }}
 
     steps:
-      # Checkout the exact SHA that failed (workflow_run) or current ref (manual)
-      - uses: actions/checkout@v4
+      # 1) Check out the exact SHA that failed (if workflow_run) or current ref (manual)
+      - name: Checkout failed commit (or current)
+        uses: actions/checkout@v4
         with:
           fetch-depth: 0
           ref: ${{ github.event.workflow_run.head_sha || github.sha }}
 
-      # Download CI logs (from failed CI run)
+      # 2) Download CI junit artifact from the failed CI run (if workflow_run)
       - name: Download CI logs (from failed CI run)
         if: ${{ github.event_name == 'workflow_run' }}
         uses: actions/download-artifact@v4
         with:
-          name: ci-logs
+          name: ci-logs                 # <-- must match the name used in CI
           path: ./ci-logs
           run-id: ${{ github.event.workflow_run.id }}
         continue-on-error: true
 
-      # Fallback for manual runs (no run-id context)
+      # Fallback (manual trigger): try to fetch latest artifact named ci-logs
       - name: Download CI logs (manual fallback)
         if: ${{ github.event_name == 'workflow_dispatch' }}
         uses: actions/download-artifact@v4
@@ -42,18 +53,68 @@ jobs:
           path: ./ci-logs
         continue-on-error: true
 
+      # 3) Auth to Google Cloud (sets GOOGLE_APPLICATION_CREDENTIALS automatically)
+      - name: Auth to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+
+      # (Optional, but useful for debugging creds / project)
+      - name: Setup gcloud (debug only)
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Show gcloud account/project (debug)
+        run: |
+          gcloud auth list || true
+          gcloud config list || true
+
+      # 4) Python and env for healer
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
-      # Provide bot identity (used by the healer to commit/push)
-      - name: Set env for healer
+      - name: Set bot identity env
         run: |
           echo "GH_BOT_ACTOR=agentic-bot" >> $GITHUB_ENV
           echo "GH_BOT_EMAIL=agentic-bot@example.com" >> $GITHUB_ENV
 
-      - name: Run smarter healer
+      # 5) Run your Vertex-powered healer (stdlib only)
+      - name: Run Agentic Healer (Vertex + fallbacks)
         run: |
           python agents/mcp_server.py
 
+      # 6) Compute the fix branch name the healer uses: auto-fix/<sha8>
+      - name: Compute auto-fix branch
+        id: af
+        run: |
+          SHA8="$(git rev-parse --short HEAD)"
+          echo "sha8=${SHA8}" >> $GITHUB_OUTPUT
+          echo "branch=auto-fix/${SHA8}" >> $GITHUB_OUTPUT
+          echo "Computed auto-fix branch: auto-fix/${SHA8}"
+
+      # 7) Open a PR to main if the branch exists (healer only pushes if tests pass)
+      - name: Open PR to main
+        if: ${{ always() }}
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const branch = `auto-fix/${{ steps.af.outputs.sha8 }}`;
+            try {
+              // Check if branch exists on origin
+              const { execSync } = require('node:child_process');
+              execSync(`git ls-remote --exit-code --heads origin ${branch}`, { stdio: 'inherit' });
+
+              // Create PR
+              const { owner, repo } = context.repo;
+              const title = `Agentic fix: auto-heal for ${branch}`;
+              const body  = 'This PR was opened automatically by Agentic-Heal after a CI failure. It includes changes that made tests pass in CI. Please review and merge.';
+              const base  = 'main';
+              const head  = branch;
+
+              const pr = await github.rest.pulls.create({
+                owner, repo, title, head, base, body
+              });
+              core.info(`Opened PR #${pr.data.number} from ${head} -> ${base}`);
+            } catch (e) {
+              core.warning(`No auto-fix branch found or PR creation failed: ${e.message}`);
