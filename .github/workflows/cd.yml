@@ -62,7 +62,7 @@ jobs:
           gcloud auth configure-docker --quiet
 
       # 6) Quick sanity on AR (now that the account is active)
-      - name: Sanity: list Artifact Registry repos
+      - name: "Sanity: list Artifact Registry repos"
         run: |
           set -euo pipefail
           AR="${AR_REGION:-}"; AR="${AR:-us-central1}"
@@ -70,7 +70,7 @@ jobs:
           gcloud artifacts repositories describe "${REPO_NAME}" --location="$AR" --project="${PROJECT_ID}"
 
       # 7) Explicit AR docker login (good diagnostics if auth is wrong)
-      - name: Artifact Registry docker login
+      - name: "Artifact Registry docker login"
         run: |
           set -euo pipefail
           AR="${AR_REGION:-}"; AR="${AR:-us-central1}"
