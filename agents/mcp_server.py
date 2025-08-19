@@ -245,7 +245,7 @@ def push_autofix_branch() -> None:
     sha8 = current_sha_short()
     branch = f"auto-fix/{sha8}"
     run(["git", "checkout", "-b", branch], check=True)
-    run(["git", "add", "-A"], check=True)
+    run(["git", "add", "-u"], check=True)
     # create a concise commit message
     run(["git", "commit", "-m", "Agentic fix: CI failure auto-patch"], check=True)
     run(["git", "push", "origin", branch], check=True)
