@@ -35,13 +35,27 @@ jobs:
 
       # 2) Download CI junit artifact from the failed CI run (if workflow_run)
       - name: Download CI logs (from failed CI run)
-        if: ${{ github.event_name == 'workflow_run' }}
+        if: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'failure' }}
         uses: actions/download-artifact@v4
         with:
           name: ci-logs                 # <-- must match CI upload name
           path: ./ci-logs
           run-id: ${{ github.event.workflow_run.id }}
-        continue-on-error: true
+        continue-on-error: false
+      
+      # Debug: list artifacts on the failed CI run (helps if download fails)
+      - name: Debug list artifacts on failed CI run
+        if: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'failure' }}
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const runId = ${{ github.event.workflow_run.id }};
+            const { owner, repo } = context.repo;
+            const res = await github.rest.actions.listWorkflowRunArtifacts({ owner, repo, run_id: runId });
+            core.info(`Artifacts on CI run ${runId}:`);
+            for (const a of res.data.artifacts) {
+              core.info(`- ${a.name} (#${a.id}) size=${a.size_in_bytes} expired=${a.expired}`);
+            }
 
       # Fallback (manual trigger): try to fetch latest artifact named ci-logs
       - name: Download CI logs (manual fallback)
@@ -90,8 +104,10 @@ jobs:
       - name: Compute auto-fix branch
         id: af
         run: |
-          echo "branch=auto-fix/$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
-          echo "Computed branch: auto-fix/$(git rev-parse --short HEAD)"
+          # Read the branch name directly from git
+          BRANCH="$(git rev-parse --abbrev-ref HEAD)"
+          echo "branch=${BRANCH}" >> $GITHUB_OUTPUT
+          echo "Computed branch: ${BRANCH}"
 
       # 7) Open a PR to main if the branch exists (healer pushes only if tests pass)
       - name: Open PR to main (if branch exists)
