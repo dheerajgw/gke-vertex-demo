@@ -35,12 +35,14 @@ jobs:
 
       # 2) Download CI junit artifact from the failed CI run (if workflow_run)
       - name: Download CI logs (from failed CI run)
-        if: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'failure' }}
+        if: ${{ github.event_name == 'workflow_run' }}
         uses: actions/download-artifact@v4
         with:
           name: ci-logs                 # <-- must match CI upload name
           path: ./ci-logs
-          run-id: ${{ github.event.workflow_run.id }}
+          run-id: ${{ github.event.workflow_run.id }}i
+          repository: ${{ github.repository }}       # <—
+          github-token: ${{ secrets.GITHUB_TOKEN }}  # <—
         continue-on-error: false
       
       # Debug: list artifacts on the failed CI run (helps if download fails)
@@ -64,6 +66,8 @@ jobs:
         with:
           name: ci-logs
           path: ./ci-logs
+          repository: ${{ github.repository }}       # <—
+          github-token: ${{ secrets.GITHUB_TOKEN }}  # <—
         continue-on-error: true
 
       # 3) Auth to Google Cloud (sets GOOGLE_APPLICATION_CREDENTIALS automatically)
