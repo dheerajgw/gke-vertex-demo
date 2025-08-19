@@ -4,6 +4,7 @@ on:
   push:
     branches: ["main"]
   pull_request:
+    branches: ["main"]
 
 jobs:
   test_build:
@@ -11,28 +12,47 @@ jobs:
     defaults:
       run:
         working-directory: app
+
     steps:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-node@v4
         with:
-          node-version: "18"
+          node-version: '18'
+          cache: 'npm'
+          cache-dependency-path: |
+            app/package-lock.json
+            app/web/package-lock.json
 
-      - name: Install deps
+      # Install API deps (app/)
+      - name: Install API deps
         run: npm ci
 
-      - name: Build web
+      # Build the Vite web app (runs: cd web && npm ci && npm run build)
+      - name: Build web (vite)
         run: npm run build:web
 
-      - name: Test with JUnit reporter
+      # Run tests and write JUnit to ./junit.xml (remember: working dir = app/)
+      - name: Run tests (write JUnit)
         env:
           JEST_JUNIT_OUTPUT: ./junit.xml
         run: npx jest --runInBand --reporters=default --reporters=jest-junit
 
-      - name: Upload JUnit
+      # Ensure junit.xml always exists so Agentic‑Heal can download ci-logs
+      - name: Ensure junit.xml exists
+        if: always()
+        run: |
+          if [ ! -f junit.xml ]; then
+            echo '<testsuites name="jest tests" tests="0" failures="0"></testsuites>' > junit.xml
+            echo "Created placeholder junit.xml"
+          fi
+          ls -l junit.xml || true
+
+      # Upload the test report artifact for Agentic‑Heal
+      - name: Upload JUnit (ci-logs)
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: ci-logs
-          path: app/junit.xml
-          if-no-files-found: warn
+          path: junit.xml
+          if-no-files-found: error
