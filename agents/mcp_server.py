@@ -1,3 +1,7 @@
+import os
+DISABLE_HEAL_PATCH = os.environ.get("DISABLE_HEAL_PATCH","1") == "1"
+import os
+DISABLE_HEAL_PATCH = os.environ.get("DISABLE_HEAL_PATCH","1") == "1"
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
@@ -205,8 +209,14 @@ def extract_diff_block(s: str) -> str:
 
 def apply_patch(diff_text: str) -> bool:
     if not diff_text.strip():
+    if DISABLE_HEAL_PATCH or not tmp.exists():
+        print("Patch mode disabled or missing auto_fix.patch; skipping")
+        return False
         return False
     tmp = ROOT / "auto_fix.patch"
+    if DISABLE_HEAL_PATCH or not tmp.exists():
+        print("Patch mode disabled or missing auto_fix.patch; skipping")
+        return False
     tmp.write_text(diff_text, encoding="utf-8")
     # Try apply with -p0; allow whitespace noise
     code, out = run_cap(["git", "apply", "--index", "--whitespace=nowarn", "-p0", str(tmp)])
