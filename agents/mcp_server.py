@@ -1,10 +1,7 @@
-import os
-DISABLE_HEAL_PATCH = os.environ.get("DISABLE_HEAL_PATCH","1") == "1"
-import os
-DISABLE_HEAL_PATCH = os.environ.get("DISABLE_HEAL_PATCH","1") == "1"
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
+
 Vertex-powered MCP-style healer for CI failures.
 
 Env required:
@@ -26,9 +23,9 @@ Exit codes:
   5 = Vertex call failed
   6 = Repo/Env missing critical bits
 """
-
 from __future__ import annotations
-import os
+DISABLE_HEAL_PATCH = os.environ.get("DISABLE_HEAL_PATCH", "0") == "1"
+
 import sys
 import json
 import textwrap
