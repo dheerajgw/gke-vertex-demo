@@ -1,7 +1,20 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""
+from __future__ import annotations
 
+import os
+import sys
+import re
+import json
+import textwrap
+import subprocess
+from pathlib import Path
+from typing import List, Tuple
+
+# When DISABLE_HEAL_PATCH=1, skip applying LLM patches
+DISABLE_HEAL_PATCH = os.environ.get("DISABLE_HEAL_PATCH", "0") == "1"
+
+"""
 Vertex-powered MCP-style healer for CI failures.
 
 Env required:
@@ -23,15 +36,6 @@ Exit codes:
   5 = Vertex call failed
   6 = Repo/Env missing critical bits
 """
-from __future__ import annotations
-DISABLE_HEAL_PATCH = os.environ.get("DISABLE_HEAL_PATCH", "0") == "1"
-
-import sys
-import json
-import textwrap
-import subprocess
-from pathlib import Path
-from typing import List, Tuple
 
 # -------- utilities
 
@@ -41,24 +45,40 @@ CILOG_DIR = ROOT / "ci-logs"
 
 
 def run(cmd: List[str], cwd: Path | None = None, check: bool = True) -> subprocess.CompletedProcess:
-    """Run a command, echoing it, returning CompletedProcess. Raises if check and non-zero."""
+    """Run a command, echoing it; raise if non-zero and check=True."""
     print(f"$ {' '.join(cmd)}")
-    return subprocess.run(cmd, cwd=str(cwd) if cwd else None, text=True, capture_output=False, check=check)
+    return subprocess.run(
+        cmd,
+        cwd=str(cwd) if cwd else None,
+        text=True,
+        capture_output=False,
+        check=check,
+    )
 
-def run_cap(cmd: List[str], cwd: Path | None = None) -> Tuple[int, str]:
-    """Run a command, capturing stdout+stderr."""
+
+def run_cap(cmd: List[str], cwd: Path | None = None, env: dict | None = None) -> Tuple[int, str]:
+    """Run a command, capturing stdout+stderr (merged)."""
     print(f"$ {' '.join(cmd)}")
-    p = subprocess.run(cmd, cwd=str(cwd) if cwd else None, text=True,
-                       stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    p = subprocess.run(
+        cmd,
+        cwd=str(cwd) if cwd else None,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        env=env,
+    )
     return p.returncode, p.stdout
+
 
 def ensure_git_identity() -> None:
     run(["git", "config", "user.name", os.environ.get("GH_BOT_ACTOR", "agentic-bot")], check=True)
     run(["git", "config", "user.email", os.environ.get("GH_BOT_EMAIL", "agentic-bot@example.com")], check=True)
 
+
 def current_sha_short() -> str:
     code, out = run_cap(["git", "rev-parse", "--short", "HEAD"])
     return out.strip() if code == 0 else "unknown"
+
 
 # -------- file gathering
 
@@ -75,9 +95,9 @@ def important_files() -> List[Path]:
         "agents/**/*.py",
         ".github/workflows/*.yml", ".github/workflows/*.yaml",
         "k8s/**/*.yaml", "k8s/**/*.yml",
-        "Dockerfile", "app/Dockerfile", "README.md"
+        "Dockerfile", "app/Dockerfile", "README.md",
     ]
-    seen = set()
+    seen: set[Path] = set()
     files: List[Path] = []
     for patt in patterns:
         for p in ROOT.rglob(patt):
@@ -93,11 +113,11 @@ def important_files() -> List[Path]:
             files.append(rel)
     return files
 
+
 def read_ci_logs() -> str:
     if not CILOG_DIR.exists():
         return ""
-    blobs = []
-    # Prefer junit.xml, but include everything small
+    blobs: List[str] = []
     for p in sorted(CILOG_DIR.rglob("*")):
         if p.is_dir():
             continue
@@ -105,29 +125,29 @@ def read_ci_logs() -> str:
             text = p.read_text(encoding="utf-8", errors="replace")
         except Exception:
             continue
-        # Bound each file to ~128KB to avoid prompt bloat
         if len(text) > 128_000:
             text = text[:128_000] + "\n[...truncated...]\n"
         blobs.append(f"=== {p.name} ===\n{text}\n")
-    return "\n".join(blobs)[:500_000]  # cap total
+    return "\n".join(blobs)[:500_000]
+
 
 def read_code_context() -> str:
-    chunks = []
+    chunks: List[str] = []
     total = 0
     for rel in important_files():
         try:
             text = (ROOT / rel).read_text(encoding="utf-8", errors="replace")
         except Exception:
             continue
-        # keep small files, truncate bigger ones
         if len(text) > 120_000:
             text = text[:120_000] + "\n[...truncated...]\n"
         blob = f"=== {rel.as_posix()} ===\n{text}\n"
         total += len(blob)
-        if total > 800_000:  # keep budget
+        if total > 800_000:
             break
         chunks.append(blob)
     return "\n".join(chunks)
+
 
 # -------- Vertex AI
 
@@ -179,11 +199,15 @@ def vertex_generate_patch(prompt: str) -> str:
     full_prompt = sys_prompt + "\n\n" + prompt
     try:
         resp = model.generate_content(full_prompt)
-        text = getattr(resp, "text", None) or (resp.candidates[0].content.parts[0].text if getattr(resp, "candidates", None) else "")
+        text = getattr(resp, "text", None) or (
+            resp.candidates[0].content.parts[0].text
+            if getattr(resp, "candidates", None) else ""
+        )
         return text or ""
     except Exception as e:
         print(f"Vertex call failed: {e}")
         raise SystemExit(5)
+
 
 def extract_diff_block(s: str) -> str:
     """Extract the first ```diff ...``` fenced block."""
@@ -198,7 +222,8 @@ def extract_diff_block(s: str) -> str:
     end = s.find("```", start)
     if end == -1:
         return ""
-    return s[start+1:end].strip()
+    return s[start + 1:end].strip()
+
 
 # -------- Patch + test
 
@@ -224,7 +249,21 @@ def apply_patch(diff_text: str) -> bool:
             if code != 0:
                 print("Patch failed to apply.")
                 return False
+
+    # Best effort: remove patch file after successful apply
+    try:
+        tmp.unlink(missing_ok=True)  # Python 3.8+: missing_ok supported on Path.unlink?
+    except TypeError:
+        try:
+            if tmp.exists():
+                tmp.unlink()
+        except Exception:
+            pass
+    except Exception:
+        pass
+
     return True
+
 
 def run_tests() -> bool:
     # 1) install
@@ -248,32 +287,36 @@ def run_tests() -> bool:
     if jest_bin.exists():
         code_t, out_t = run_cap(
             ["npx", "jest", "--runInBand", "--reporters=default", "--reporters=jest-junit"],
-            cwd=APP_DIR
+            cwd=APP_DIR,
+            env=env,
         )
         print(out_t)
         return code_t == 0
     else:
-        code_t2, out_t2 = run_cap(["npm", "test"], cwd=APP_DIR)
+        code_t2, out_t2 = run_cap(["npm", "test"], cwd=APP_DIR, env=env)
         print(out_t2)
         return code_t2 == 0
+
+
 def push_autofix_branch() -> None:
     ensure_git_identity()
     sha8 = current_sha_short()
     branch = f"auto-fix/{sha8}"
     run(["git", "checkout", "-b", branch], check=True)
     run(["git", "add", "-u"], check=True)
-    # create a concise commit message
     run(["git", "commit", "-m", "Agentic fix: CI failure auto-patch"], check=True)
     run(["git", "push", "origin", branch], check=True)
     print(f"Pushed {branch}")
+
 
 # -------- fallback heuristics (tiny, safe)
 
 def fallback_heuristics() -> bool:
     """
-    Very small guardrails if the model fails: 
+    Very small guardrails if the model fails:
     - Fix 'healthzz' → 'healthz'
     - Fix 'messege:' → 'message:'
+    - Fix accidental missing '=' in arrow functions: ') > {' → ') => {'
     - Ensure /api/healthz exists before catch-all in app/api/server.js
     """
     changed = False
@@ -282,24 +325,28 @@ def fallback_heuristics() -> bool:
         s = srv.read_text(encoding="utf-8", errors="replace")
         t = s.replace("app.get('/api/healthzz'", "app.get('/api/healthz'")
         t = t.replace("messege:", "message:")
+        # fix missing '=' in arrow functions
+        t = re.sub(r"\)\s*>\s*\{", ") => {", t)
+
         # ensure route exists before catch-all
         if "/api/healthz" not in t:
-            # insert a minimal route before the catch-all
             star_idx = t.find("app.get('*'")
             inject = "\napp.get('/api/healthz', (req,res)=>{res.json({ status:'ok', message:'Hello from GKE Vertex PoC!' });});\n"
             if star_idx != -1:
                 t = t[:star_idx] + inject + t[star_idx:]
             else:
                 t += inject
+
         if t != s:
             srv.write_text(t, encoding="utf-8")
             changed = True
+
     if changed:
-        # try tests
         if run_tests():
             push_autofix_branch()
             return True
     return False
+
 
 # -------- main
 
@@ -319,10 +366,33 @@ def build_llm_prompt() -> str:
     {code}
     """)
 
+
+def vertex_try(prompt: str) -> str:
+    """Isolate Vertex call so we can clearly fall back."""
+    from vertexai import init as vertex_init
+    from vertexai.generative_models import GenerativeModel
+
+    project = os.environ.get("GCP_PROJECT_ID")
+    location = os.environ.get("GCP_LOCATION")
+    model_name = os.environ.get("VERTEX_MODEL", "gemini-1.5-pro")
+
+    if not project or not location:
+        print("Missing GCP_PROJECT_ID or GCP_LOCATION")
+        raise SystemExit(6)
+
+    vertex_init(project=project, location=location)
+    model = GenerativeModel(model_name)
+    resp = model.generate_content(prompt)
+    text = getattr(resp, "text", None) or (
+        resp.candidates[0].content.parts[0].text
+        if getattr(resp, "candidates", None) else ""
+    )
+    return text or ""
+
+
 def main() -> None:
     print("MCP_MANIFEST: mcp-server/vertex-orchestrator@poc (Vertex + fallbacks)")
-    # 0) sanity
-    for k in ("GCP_PROJECT_ID","GCP_LOCATION","VERTEX_MODEL"):
+    for k in ("GCP_PROJECT_ID", "GCP_LOCATION", "VERTEX_MODEL"):
         if not os.environ.get(k):
             print(f"Missing env {k}")
             raise SystemExit(6)
@@ -334,19 +404,29 @@ def main() -> None:
 
     # 2) Ask Vertex for a unified diff
     try:
-        llm_raw = vertex_generate_patch(prompt)
+        llm_raw = vertex_try(
+            textwrap.dedent("""
+            You are an expert DevOps+Software agent. You are given CI logs and code snapshots.
+            Return ONLY a unified diff patch inside a single ```diff fenced block``` that fixes the CI failure.
+            """) + "\n\n" + prompt
+        )
         diff = extract_diff_block(llm_raw)
     except SystemExit as e:
-        # vertex call failed; try fallback heuristics
         print("Vertex generation failed; trying fallback heuristics…")
         if fallback_heuristics():
             print("Fallback heuristics healed and pushed auto-fix branch.")
             return
         raise e
+    except Exception as e:
+        print(f"Vertex call failed unexpectedly: {e}")
+        print("Trying fallback heuristics…")
+        if fallback_heuristics():
+            print("Fallback heuristics healed and pushed auto-fix branch.")
+            return
+        raise SystemExit(5)
 
     if not diff:
         print("No diff block returned by model.")
-        # try small heuristics
         if fallback_heuristics():
             print("Fallback heuristics healed and pushed auto-fix branch.")
             return
@@ -355,7 +435,6 @@ def main() -> None:
     # 3) Apply patch
     if not apply_patch(diff):
         print("Patch failed to apply.")
-        # heuristics?
         if fallback_heuristics():
             print("Fallback heuristics healed and pushed auto-fix branch.")
             return
@@ -369,6 +448,7 @@ def main() -> None:
     # 5) Push auto-fix branch
     push_autofix_branch()
     print("Healed successfully, auto-fix branch pushed.")
+
 
 if __name__ == "__main__":
     main()
