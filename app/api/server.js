@@ -14,7 +14,7 @@ app.get('/api/healthz', (req, res) => {
 });
 
 // Catch-all: send index.html so SPA routes work on refresh
-app.get('*', (req, res) > {
+app.get('*', (req, res) => {
   res.sendFile(path.join(__dirname, '..', 'web', 'dist', 'index.html'));
 });
 
