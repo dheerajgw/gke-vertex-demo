@@ -194,6 +194,8 @@ def vertex_generate_patch(prompt: str) -> str:
         - If the issue is a missing API route vs SPA catch-all, ensure API routes are defined BEFORE the catch-all.
         - If tests assert JSON keys, ensure keys exist with expected values.
         - Do not add secrets or break other parts.
+        - If you find junk or invalid tokens (e.g. stray `***)`, broken brackets, or malformed syntax in test files), clean them up so the file is valid and the tests can run.
+        - Always ensure resulting code compiles and tests can execute.
     """)
 
     full_prompt = sys_prompt + "\n\n" + prompt
