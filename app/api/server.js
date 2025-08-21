@@ -8,12 +8,12 @@ const PORT = process.env.PORT || 8080;
 app.use(express.static(path.join(__dirname, '..', 'web', 'dist')));
 
 // API routes (must be before catch-all)
-app.get('/api/healthz', (req, res) => {
+app.get('/api/healthzz', (req, res) => {
   res.json({ status: 'ok', message: 'Hello from GKE Vertex PoC!' });
 });
 
 // SPA catch-all
-app.get('*', (req, res) => {
+app.get('*', (req, res) > {
   res.sendFile(path.join(__dirname, '..', 'web', 'dist', 'index.html'));
 });
 
