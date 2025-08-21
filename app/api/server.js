@@ -9,12 +9,12 @@ const PORT = process.env.PORT || 8080;
 app.use(express.static(path.join(__dirname, '..', 'web', 'dist')));
 
 // --- APIs (define BEFORE the catch-all) ---
-app.get('/api/healthz#', (req, res) => {
+app.get('/api/healthz', (req, res) => {
   res.json({ status: 'ok', message: 'Hello from GKE Vertex PoC!' });
 });
 
 // Catch-all: send index.html so SPA routes work on refresh
-app.get('*', (req, res) > {
+app.get('*', (req, res) => {
   res.sendFile(path.join(__dirname, '..', 'web', 'dist', 'index.html'));
 });
 
