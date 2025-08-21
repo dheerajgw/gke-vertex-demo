@@ -42,17 +42,15 @@ ROOT = Path.cwd()
 APP_DIR = ROOT / "app"
 CILOG_DIR = ROOT / "ci-logs"
 
-def echo(msg: str) -> None:
-    print(msg, flush=True)
 
 def run(cmd: List[str], cwd: Path | None = None, check: bool = True) -> subprocess.CompletedProcess:
     """Run a command, echoing it, returning CompletedProcess. Raises if check and non-zero."""
-    echo(f"$ {' '.join(cmd)}")
+    print(f"$ {' '.join(cmd)}")
     return subprocess.run(cmd, cwd=str(cwd) if cwd else None, text=True, capture_output=False, check=check)
 
 def run_cap(cmd: List[str], cwd: Path | None = None) -> Tuple[int, str]:
     """Run a command, capturing stdout+stderr."""
-    echo(f"$ {' '.join(cmd)}")
+    print(f"$ {' '.join(cmd)}")
     p = subprocess.run(cmd, cwd=str(cwd) if cwd else None, text=True,
                        stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
     return p.returncode, p.stdout
@@ -142,7 +140,7 @@ def vertex_generate_patch(prompt: str) -> str:
         from vertexai import init as vertex_init
         from vertexai.generative_models import GenerativeModel
     except Exception as e:
-        echo(f"Vertex SDK import failed: {e}")
+        print(f"Vertex SDK import failed: {e}")
         raise
 
     project = os.environ.get("GCP_PROJECT_ID")
@@ -150,7 +148,7 @@ def vertex_generate_patch(prompt: str) -> str:
     model_name = os.environ.get("VERTEX_MODEL", "gemini-1.5-pro")
 
     if not project or not location:
-        echo("Missing GCP_PROJECT_ID or GCP_LOCATION")
+        print("Missing GCP_PROJECT_ID or GCP_LOCATION")
         raise SystemExit(6)
 
     vertex_init(project=project, location=location)
@@ -187,7 +185,7 @@ def vertex_generate_patch(prompt: str) -> str:
         text = getattr(resp, "text", None) or (resp.candidates[0].content.parts[0].text if getattr(resp, "candidates", None) else "")
         return text or ""
     except Exception as e:
-        echo(f"Vertex call failed: {e}")
+        print(f"Vertex call failed: {e}")
         raise SystemExit(5)
 
 def extract_diff_block(s: str) -> str:
@@ -208,48 +206,59 @@ def extract_diff_block(s: str) -> str:
 # -------- Patch + test
 
 def apply_patch(diff_text: str) -> bool:
+    # Return early if the LLM produced an empty/whitespace-only diff
     if not diff_text.strip():
-    if DISABLE_HEAL_PATCH or not tmp.exists():
-        print("Patch mode disabled or missing auto_fix.patch; skipping")
         return False
-        return False
+
+    # We *create* the patch file; don't check existence before writing
     tmp = ROOT / "auto_fix.patch"
-    if DISABLE_HEAL_PATCH or not tmp.exists():
-        print("Patch mode disabled or missing auto_fix.patch; skipping")
+    if DISABLE_HEAL_PATCH:
+        print("Patch mode disabled; skipping")
         return False
+
     tmp.write_text(diff_text, encoding="utf-8")
-    # Try apply with -p0; allow whitespace noise
+
+    # Try several strategies to apply the patch
     code, out = run_cap(["git", "apply", "--index", "--whitespace=nowarn", "-p0", str(tmp)])
-    echo(out)
     if code != 0:
-        # retry without --index, then with 3-way
-        code2, out2 = run_cap(["git", "apply", "--whitespace=nowarn", "-p0", str(tmp)])
-        echo(out2)
-        if code2 != 0:
-            code3, out3 = run_cap(["git", "apply", "--3way", "--whitespace=nowarn", "-p0", str(tmp)])
-            echo(out3)
-            return code3 == 0
-        return True
+        code, out = run_cap(["git", "apply", "--whitespace=nowarn", "-p0", str(tmp)])
+        if code != 0:
+            code, out = run_cap(["git", "apply", "--3way", "--whitespace=nowarn", "-p0", str(tmp)])
+            if code != 0:
+                print("Patch failed to apply.")
+                return False
     return True
 
 def run_tests() -> bool:
-    # install
+    # 1) install
     code, out = run_cap(["npm", "ci"], cwd=APP_DIR)
-    echo(out)
+    print(out)
     if code != 0:
         return False
-    # build web (if present)
+
+    # 2) build web (if present)
     pkg = json.loads((APP_DIR / "package.json").read_text(encoding="utf-8"))
     if pkg.get("scripts", {}).get("build:web"):
         code_b, out_b = run_cap(["npm", "run", "build:web"], cwd=APP_DIR)
-        echo(out_b)
+        print(out_b)
         if code_b != 0:
             return False
-    # test
-    code_t, out_t = run_cap(["npx", "jest", "--runInBand"], cwd=APP_DIR)
-    echo(out_t)
-    return code_t == 0
 
+    # 3) run tests (prefer jest+junit; fall back to npm test)
+    env = os.environ.copy()
+    env["JEST_JUNIT_OUTPUT"] = str(APP_DIR / "junit.xml")
+    jest_bin = APP_DIR / "node_modules" / ".bin" / "jest"
+    if jest_bin.exists():
+        code_t, out_t = run_cap(
+            ["npx", "jest", "--runInBand", "--reporters=default", "--reporters=jest-junit"],
+            cwd=APP_DIR
+        )
+        print(out_t)
+        return code_t == 0
+    else:
+        code_t2, out_t2 = run_cap(["npm", "test"], cwd=APP_DIR)
+        print(out_t2)
+        return code_t2 == 0
 def push_autofix_branch() -> None:
     ensure_git_identity()
     sha8 = current_sha_short()
@@ -259,7 +268,7 @@ def push_autofix_branch() -> None:
     # create a concise commit message
     run(["git", "commit", "-m", "Agentic fix: CI failure auto-patch"], check=True)
     run(["git", "push", "origin", branch], check=True)
-    echo(f"Pushed {branch}")
+    print(f"Pushed {branch}")
 
 # -------- fallback heuristics (tiny, safe)
 
@@ -314,11 +323,11 @@ def build_llm_prompt() -> str:
     """)
 
 def main() -> None:
-    echo("MCP_MANIFEST: mcp-server/vertex-orchestrator@poc (Vertex + fallbacks)")
+    print("MCP_MANIFEST: mcp-server/vertex-orchestrator@poc (Vertex + fallbacks)")
     # 0) sanity
     for k in ("GCP_PROJECT_ID","GCP_LOCATION","VERTEX_MODEL"):
         if not os.environ.get(k):
-            echo(f"Missing env {k}")
+            print(f"Missing env {k}")
             raise SystemExit(6)
 
     ensure_git_identity()
@@ -332,37 +341,37 @@ def main() -> None:
         diff = extract_diff_block(llm_raw)
     except SystemExit as e:
         # vertex call failed; try fallback heuristics
-        echo("Vertex generation failed; trying fallback heuristics…")
+        print("Vertex generation failed; trying fallback heuristics…")
         if fallback_heuristics():
-            echo("Fallback heuristics healed and pushed auto-fix branch.")
+            print("Fallback heuristics healed and pushed auto-fix branch.")
             return
         raise e
 
     if not diff:
-        echo("No diff block returned by model.")
+        print("No diff block returned by model.")
         # try small heuristics
         if fallback_heuristics():
-            echo("Fallback heuristics healed and pushed auto-fix branch.")
+            print("Fallback heuristics healed and pushed auto-fix branch.")
             return
         raise SystemExit(2)
 
     # 3) Apply patch
     if not apply_patch(diff):
-        echo("Patch failed to apply.")
+        print("Patch failed to apply.")
         # heuristics?
         if fallback_heuristics():
-            echo("Fallback heuristics healed and pushed auto-fix branch.")
+            print("Fallback heuristics healed and pushed auto-fix branch.")
             return
         raise SystemExit(3)
 
     # 4) Run tests
     if not run_tests():
-        echo("Tests still failing after patch.")
+        print("Tests still failing after patch.")
         raise SystemExit(4)
 
     # 5) Push auto-fix branch
     push_autofix_branch()
-    echo("Healed successfully, auto-fix branch pushed.")
+    print("Healed successfully, auto-fix branch pushed.")
 
 if __name__ == "__main__":
     main()
