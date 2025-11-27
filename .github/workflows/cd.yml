@@ -114,3 +114,11 @@ jobs:
           set -euo pipefail
           kubectl -n gke-vertex-demo rollout status deploy/fancy-app
           kubectl -n gke-vertex-demo get svc fancy-app -o wide
+
+      - name: Investigate deployment failure
+        if: failure()   # runs only if the rollout step failed
+        run: |
+          python agents/mcp_server.py --check-deploy
+        env:
+          DEPLOY_NAMESPACE: gke-vertex-demo
+          DEPLOY_SELECTOR: app=fancy-app
