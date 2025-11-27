@@ -643,6 +643,14 @@ def vertex_try(prompt: str) -> str:
 
 
 def main() -> None:
+  
+  # --- Deployment investigation mode ---
+    if "--check-deploy" in sys.argv:
+        ns = os.environ.get("DEPLOY_NAMESPACE", "default")
+        sel = os.environ.get("DEPLOY_SELECTOR", "")
+        investigate_deployment_failure(namespace=ns, selector=sel)
+        return  # Important: exit after investigation
+      
     print("MCP_MANIFEST: mcp-server/vertex-orchestrator@poc (Vertex + fallbacks)")
     for k in ("GCP_PROJECT_ID", "GCP_LOCATION", "VERTEX_MODEL"):
         if not os.environ.get(k):
