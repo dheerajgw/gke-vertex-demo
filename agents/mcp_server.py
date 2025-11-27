@@ -310,6 +310,256 @@ def push_autofix_branch() -> None:
     run(["git", "push", "origin", branch], check=True)
     print(f"Pushed {branch}")
 
+# --- Deployment Investigation ---
+
+import shlex
+from datetime import datetime
+
+# Environment knobs (fallbacks)
+DEPLOY_NAMESPACE = os.environ.get("DEPLOY_NAMESPACE", "default")
+# DEPLOY_SELECTOR is a kubectl label selector to identify relevant deployments (e.g. "app=myapp")
+DEPLOY_SELECTOR = os.environ.get("DEPLOY_SELECTOR", "")  # optional
+
+def kubectl(cmd: List[str], capture: bool = True) -> Tuple[int, str]:
+    base = ["kubectl", "--namespace", DEPLOY_NAMESPACE] + cmd
+    if capture:
+        return run_cap(base)
+    else:
+        return (0, "") if run(base, check=True) else (1, "")
+
+def list_failed_deployments(selector: str | None = None) -> List[str]:
+    """Return deployment names that are not successfully rolled out."""
+    sel_args = ["-l", selector] if selector else []
+    code, out = kubectl(["get", "deploy", *sel_args, "-o", "jsonpath={range .items[*]}{.metadata.name}{\"\\n\"}{end}"])
+    if code != 0:
+        return []
+    names = [line.strip() for line in out.splitlines() if line.strip()]
+    failed = []
+    for n in names:
+        c, o = kubectl(["rollout", "status", "deploy/" + n, "--timeout=2s"])
+        # rollout status returns non-zero or times out if not ready
+        if c != 0:
+            failed.append(n)
+    return failed
+
+def get_deployment_pods(deploy_name: str) -> List[str]:
+    # find pods for a deployment via label selector from the deployment
+    code, labels = kubectl(["get", "deploy", deploy_name, "-o", "jsonpath={.spec.selector.matchLabels}"])
+    if code != 0 or not labels.strip():
+        # fallback: list pods with owner=deploy
+        code2, out2 = kubectl(["get", "pods", "-o", "jsonpath={range .items[*]}{.metadata.name}{\"\\t\"}{.metadata.ownerReferences[0].name}{\"\\n\"}{end}"])
+        pods = []
+        if code2 == 0:
+            for line in out2.splitlines():
+                try:
+                    pod, owner = line.split("\t", 1)
+                except Exception:
+                    continue
+                if owner == deploy_name:
+                    pods.append(pod)
+            return pods
+        return []
+    # labels comes like map[name:myapp app:myapp] or json-ish; simplify by asking pods by owner label
+    code3, pods_out = kubectl(["get", "pods", "-l", f"app={deploy_name}", "-o", "jsonpath={range .items[*]}{.metadata.name}{\"\\n\"}{end}"])
+    if code3 == 0 and pods_out.strip():
+        return [p for p in pods_out.splitlines() if p.strip()]
+    # fallback: return all pods for the deployment using field-selector ownerReferences
+    return []
+
+def describe_pod_and_logs(pod: str, tail_lines: int = 500) -> dict:
+    info = {"pod": pod}
+    c1, desc = kubectl(["describe", "pod", pod])
+    info["describe"] = desc if c1 == 0 else ""
+    c2, logs = kubectl(["logs", pod, f"--tail={tail_lines}"])
+    if c2 != 0:
+        # try previous container or include message
+        c3, logs_prev = kubectl(["logs", pod, "--previous", f"--tail={tail_lines}"])
+        logs = logs_prev if c3 == 0 else ""
+    info["logs"] = logs
+    return info
+
+def parse_image_from_deployment(deploy_name: str) -> List[Tuple[str, str]]:
+    """Return list of (containerName, image) for a deployment."""
+    c, out = kubectl(["get", "deploy", deploy_name, "-o", "jsonpath={range .spec.template.spec.containers[*]}{.name}{\"|\"}{.image}{\"\\n\"}{end}"])
+    if c != 0 or not out.strip():
+        return []
+    imgs = []
+    for line in out.splitlines():
+        if "|" in line:
+            name, img = line.split("|", 1)
+            imgs.append((name.strip(), img.strip()))
+    return imgs
+
+def git_commit_info(commit: str) -> dict:
+    c, out = run_cap(["git", "show", "-s", "--format=%H%n%an%n%ae%n%ad%n%s", commit])
+    if c != 0:
+        return {}
+    lines = out.splitlines()
+    return {
+        "hash": lines[0] if len(lines) > 0 else commit,
+        "author": lines[1] if len(lines) > 1 else "",
+        "email": lines[2] if len(lines) > 2 else "",
+        "date": lines[3] if len(lines) > 3 else "",
+        "subject": lines[4] if len(lines) > 4 else "",
+    }
+
+def find_commits_touching_paths(paths: List[str], n: int = 5) -> List[dict]:
+    """Return last n commits touching any of the given paths."""
+    commits = []
+    # use --pretty=format:%H to get hashes
+    args = ["log", f"-n{n}", "--pretty=format:%H", "--"] + paths
+    c, out = run_cap(["git"] + args)
+    if c != 0 or not out.strip():
+        return []
+    for h in out.splitlines():
+        commits.append(git_commit_info(h.strip()))
+    return commits
+
+def find_commits_touching_manifests(n: int = 5) -> List[dict]:
+    pats = ["k8s", "kubernetes", "deploy", "manifests", ".github/workflows", "Dockerfile", "app/Dockerfile"]
+    paths = []
+    for p in pats:
+        for f in ROOT.rglob(f"{p}/*"):
+            try:
+                rel = f.relative_to(ROOT)
+            except Exception:
+                continue
+            if rel.is_file():
+                paths.append(str(rel))
+    if not paths:
+        # fallback: look at top-level k8s yaml files
+        for f in ROOT.glob("*.yaml"):
+            try:
+                paths.append(str(f.relative_to(ROOT)))
+            except Exception:
+                continue
+    if not paths:
+        return []
+    # limit to a handful paths to keep git quick
+    return find_commits_touching_paths(paths[:50], n=n)
+
+def identify_offending_commit_from_image(image: str) -> dict | None:
+    """
+    If image contains a short/long git SHA, try to verify and return commit info.
+    Examples:
+      my-registry/myrepo/myapp:sha1234abcd
+      gcr.io/proj/myapp@sha256:...
+    """
+    # heuristics: detect hex substrings of length 7-40
+    m = re.search(r"(?P<sha>[0-9a-f]{7,40})", image)
+    if not m:
+        return None
+    sha = m.group("sha")
+    # try to resolve to full commit
+    code, out = run_cap(["git", "rev-parse", "--verify", sha])
+    if code != 0:
+        # maybe short -> try rev-parse with ^? or assume short ok
+        return None
+    full = out.strip()
+    return git_commit_info(full)
+
+def investigate_deployment_failure(namespace: str | None = None, selector: str | None = None) -> dict:
+    """
+    High-level investigator. Returns a dictionary with:
+    - failed_deployments: [names]
+    - per_deployment: { name: { images: [...], pods: [...], pod_info: [...], candidate_commits: [...] } }
+    """
+    if namespace:
+        global DEPLOY_NAMESPACE
+        DEPLOY_NAMESPACE = namespace
+
+    sel = selector or (DEPLOY_SELECTOR if DEPLOY_SELECTOR else None)
+    result = {"namespace": DEPLOY_NAMESPACE, "selector": sel, "failed_deployments": [], "per_deployment": {}}
+
+    failed = list_failed_deployments(sel)
+    result["failed_deployments"] = failed
+
+    for d in failed:
+        info = {"images": [], "pods": [], "pod_info": [], "candidate_commits": []}
+        imgs = parse_image_from_deployment(d)
+        info["images"] = imgs
+
+        pods = get_deployment_pods(d)
+        info["pods"] = pods
+
+        for p in pods:
+            info["pod_info"].append(describe_pod_and_logs(p))
+
+        # candidate commits: by image -> if image contains sha, add that commit
+        candidate_commits = []
+        for cname, img in imgs:
+            maybe = identify_offending_commit_from_image(img)
+            if maybe:
+                candidate_commits.append({"reason": "image-sha", "commit": maybe, "image": img})
+
+        # fallback: last commits touching k8s manifests
+        manifest_commits = find_commits_touching_manifests(n=5)
+        if manifest_commits:
+            candidate_commits.append({"reason": "manifest-change", "commits": manifest_commits})
+
+        # fallback: last commits touching app code
+        recent_app_commits = []
+        c, out = run_cap(["git", "log", "--pretty=format:%H%n%an%n%ad%n%s", "-n", "5"])
+        if c == 0 and out.strip():
+            lines = out.splitlines()
+            # parse groups of 4 lines (hash, author, date, subject) - best-effort
+            parsed = []
+            i = 0
+            while i + 3 < len(lines):
+                parsed.append({
+                    "hash": lines[i].strip(),
+                    "author": lines[i+1].strip(),
+                    "date": lines[i+2].strip(),
+                    "subject": lines[i+3].strip(),
+                })
+                i += 4
+            if parsed:
+                recent_app_commits = parsed
+                candidate_commits.append({"reason": "recent-commits", "commits": recent_app_commits})
+
+        info["candidate_commits"] = candidate_commits
+        result["per_deployment"][d] = info
+
+    # print a human-friendly summary
+    print("\n--- Deployment investigation summary ---")
+    if not failed:
+        print("No failed deployments found (namespace=%s, selector=%s)" % (DEPLOY_NAMESPACE, sel))
+        return result
+
+    for dep, depinfo in result["per_deployment"].items():
+        print(f"\nDeployment: {dep}")
+        print("Images:")
+        for n, img in depinfo["images"]:
+            print(f"  - {n}: {img}")
+        print("Pods:")
+        for p in depinfo["pods"]:
+            print(f"  - {p}")
+        print("Pod problems (describe/log excerpts):")
+        for podi in depinfo["pod_info"]:
+            name = podi.get("pod")
+            desc = podi.get("describe", "")
+            # try extract events/errors lines
+            errs = []
+            for L in desc.splitlines():
+                if any(k in L.lower() for k in ("err", "fail", "backoff", "imagepull", "crashloop", "o k il", "oomkill")):
+                    errs.append(L.strip())
+            print(f"  {name}: {errs[:5]}")
+        print("Candidate commits (by heuristic):")
+        for c in depinfo["candidate_commits"]:
+            reason = c.get("reason")
+            if reason == "image-sha":
+                cm = c.get("commit")
+                print(f"  - image tag maps to commit {cm.get('hash')} {cm.get('subject')} (author {cm.get('author')})")
+            elif reason == "manifest-change":
+                for cm in c.get("commits", []):
+                    print(f"  - manifest change {cm.get('hash')} {cm.get('subject')} ({cm.get('date')})")
+            elif reason == "recent-commits":
+                for cm in c.get("commits", []):
+                    print(f"  - recent {cm.get('hash')} {cm.get('subject')}")
+            else:
+                print(f"  - {c}")
+    print("--- end summary ---\n")
+    return result
 
 # -------- fallback heuristics (tiny, safe)
 
