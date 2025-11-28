@@ -660,8 +660,47 @@ def main() -> None:
     ensure_git_identity()
 
     # 1) Build prompt from logs + code
+    # --- optionally include deployment investigation into the LLM prompt ---
+    # Controlled by env var INCLUDE_DEPLOY_INVESTIGATION=1 to avoid running in CI unintentionally.
     prompt = build_llm_prompt()
-
+    if os.environ.get("INCLUDE_DEPLOY_INVESTIGATION") == "1":
+      try:
+          ns = os.environ.get("DEPLOY_NAMESPACE", "default")
+          sel = os.environ.get("DEPLOY_SELECTOR", "")
+          inv = investigate_deployment_failure(namespace=ns, selector=sel)
+  
+          # Save full JSON for artifacts/debugging
+          (ROOT / "ci-logs").mkdir(exist_ok=True)
+          (ROOT / "ci-logs" / "deploy-investigation.json").write_text(json.dumps(inv, indent=2), encoding="utf-8")
+  
+          # Create a concise human summary to append to the prompt (truncate to keep prompt small)
+          summary = []
+          failed = inv.get("failed_deployments", [])
+          if not failed:
+              summary.append("DEPLOYMENT INVESTIGATION: no failed deployments found.")
+          else:
+              for d in failed:
+                  info = inv["per_deployment"].get(d, {})
+                  imgs = info.get("images", [])
+                  summary.append(f"Deployment {d} failed. Images: " + ",".join([f"{n}:{i}" for n,i in imgs]))
+                  pods = info.get("pods", [])[:5]
+                  summary.append("  Pods: " + ",".join(pods) if pods else "  No pods found")
+                  # candidate commits (brief)
+                  cands = info.get("candidate_commits", [])[:3]
+                  for c in cands:
+                      if c.get("reason") == "image-sha" and c.get("commit"):
+                          cm = c["commit"]
+                          summary.append(f"  Candidate commit (image tag): {cm.get('hash')} - {cm.get('subject')}")
+                      elif c.get("reason") == "manifest-change":
+                          for cm in c.get("commits", [])[:2]:
+                              summary.append(f"  Manifest changed in {cm.get('hash')} - {cm.get('subject')}")
+          deploy_block = "\n".join(summary)
+          # Keep only first ~50k chars to avoid blowing up model context
+          prompt = prompt + "\n\nDEPLOYMENT INVESTIGATION SUMMARY:\n" + deploy_block[:50_000]
+  
+      except Exception as e:
+          prompt = prompt + f"\n\nDEPLOYMENT INVESTIGATION FAILED: {e}\n"
+    
     # 2) Ask Vertex for a unified diff
     try:
         llm_raw = vertex_try(
